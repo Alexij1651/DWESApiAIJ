@@ -1,312 +1,256 @@
-import { MongoClient, ObjectId } from 'mongodb'
-import express from "express"
-import cors from "cors"
-import bcrypt from "bcryptjs"
-import jwt from "jsonwebtoken"
-import rateLimit from "express-rate-limit"
+import express from "express";
+import cors from "cors";
+import bcrypt from "bcryptjs"  // Hashing de contraseñas
+import jwt from "jsonwebtoken" // Generacion y verificacion de tokens
 import swaggerUi from "swagger-ui-express"
-import { createHash, randomUUID } from "node:crypto"
-import { swaggerSpec } from "./swagger.js"
+import swaggerDocument from "./openapi.json" with { type: "json" }
+// Para que swagger funcione correctamente en Vercel es necesario archivo vercel.json
+// y añadir configuración indicada en https://github.com/swagger-api/swagger-ui/issues/9924#issuecomment-3360835086
 
-const PUERTO = process.env.PORT ?? 3001
-const URL_BD = process.env.MONGODB_URI ?? 'mongodb://localhost:27017'
-const NOMBRE_BD = process.env.DB_NAME ?? 'api'
-const SECRETO_JWT = process.env.JWT_SECRET
-const SECRETO_REFRESH = process.env.REFRESH_SECRET
-const CADUCIDAD_ACCESO = process.env.ACCESS_EXPIRES ?? '15m'
-const DIAS_CADUCIDAD_REFRESH = 7
 
-const USUARIOS = 'users'
-const PRODUCTOS = 'products'
-const TOKENS_REFRESCO = 'refresh_tokens'
-
-if (!SECRETO_JWT || !SECRETO_REFRESH) {
-    console.error('Faltan las variables de entorno JWT_SECRET y/o REFRESH_SECRET')
-    process.exit(1)
-}
-
+const SECRET_KEY = "secreto" // Secreto para firmar y verificar el token
 const app = express()
-app.set('trust proxy', 1)
-app.use(express.json())
-app.use(cors())
 
-const limitadorGlobal = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { message: 'Demasiadas peticiones, inténtalo más tarde' }
-})
+//Estas contraseñas son las que nos permite iniciar sesion
+let Users = [
+    { id: 0, nombre: "Alex", edad: 30, password: "$2b$10$DJaR.zEOJhgU2CA32EMaL.zImAjxfYPL7NCD9UG.dXdLOciuhzyXS" }, // password: 123456
+    { id: 1, nombre: "Ana", edad: 25, password: "$2b$10$l/.WxXkTG6pKVB7KYU/KROXVvH7nAQqyrsq5PW1b.1X4v6L2u00u2" }, // password: ana
+    { id: 2, nombre: "Eva", edad: 28, password: "$2b$10$TW/qH6MQ/fd4sRijnHIdoekydhtIonurDMvxZHgqNaIR4st2A90Xe" }  // password: eva
+]
 
-const limitadorAuth = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { message: 'Demasiados intentos de autenticación, inténtalo más tarde' }
-})
+let Motores = [
+    { id: 0, marca: "BMW", modelo: "Serie 3", cilindrada: 2000, combustible: "Diesel", kilometros: 150000, precio: 12000 },
+    { id: 1, marca: "Audi", modelo: "A4", cilindrada: 1900, combustible: "Gasolina", kilometros: 120000, precio: 10000 }
+]
 
-app.use(limitadorGlobal)
 
-const cliente = new MongoClient(URL_BD)
-await cliente.connect()
-const bd = cliente.db(NOMBRE_BD)
-const usuarios = bd.collection(USUARIOS)
-const productos = bd.collection(PRODUCTOS)
-const tokensRefresco = bd.collection(TOKENS_REFRESCO)
 
-await usuarios.createIndex({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } })
-await tokensRefresco.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+app.use(express.json())   // IMPORTANTE
+app.use(cors())           // Para habilitar CORS
+app.use(
+    "/api-docs",
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerDocument)
+)
 
-const manejadorAsync = (funcion) => (peticion, respuesta, siguiente) =>
-    Promise.resolve(funcion(peticion, respuesta, siguiente)).catch(siguiente)
 
-const esIdValido = (id) => ObjectId.isValid(id) && String(new ObjectId(id)) === id
 
-const hashearToken = (token) => createHash('sha256').update(token).digest('hex')
+function verifyToken(request, response, next) {
+    const token = request.headers.authorization?.split(" ")[1]; // formato "Bearer <token>"
 
-const esTextoNoVacio = (valor) => typeof valor === 'string' && valor.trim().length > 0
-const esEmail = (valor) => typeof valor === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(valor)
-
-const exigirJson = (peticion, respuesta, siguiente) => {
-    if (!peticion.is('json'))
-        return respuesta.status(415).json({ message: 'Debes proporcionar datos JSON' })
-    siguiente()
-}
-
-const exigirIdValido = (peticion, respuesta, siguiente) => {
-    if (!esIdValido(peticion.params.id))
-        return respuesta.status(400).json({ message: 'Id no válido' })
-    siguiente()
-}
-
-const firmarTokenAcceso = (usuario) =>
-    jwt.sign({ sub: String(usuario._id), email: usuario.email }, SECRETO_JWT, { expiresIn: CADUCIDAD_ACCESO })
-
-const emitirTokenRefresco = async (usuario) => {
-    const token = jwt.sign({ sub: String(usuario._id) }, SECRETO_REFRESH, {
-        expiresIn: `${DIAS_CADUCIDAD_REFRESH}d`,
-        jwtid: randomUUID()
-    })
-    await tokensRefresco.insertOne({
-        tokenHash: hashearToken(token),
-        userId: usuario._id,
-        expiresAt: new Date(Date.now() + DIAS_CADUCIDAD_REFRESH * 24 * 60 * 60 * 1000)
-    })
-    return token
-}
-
-const verificarToken = (peticion, respuesta, siguiente) => {
-    const cabecera = peticion.headers.authorization ?? ''
-    const [esquema, token] = cabecera.split(' ')
-
-    if (esquema !== 'Bearer' || !token)
-        return respuesta.status(401).json({ message: 'Token no proporcionado' })
+    if (!token) return response.status(403).json({ message: "Token requerido" });
 
     try {
-        peticion.usuario = jwt.verify(token, SECRETO_JWT)
-        siguiente()
-    } catch {
-        return respuesta.status(401).json({ message: 'Token no válido o caducado' })
+        request.user = jwt.verify(token, SECRET_KEY);
+        next();
+    } catch (err) {
+        return response.status(403).json({ message: "Token inválido" });
     }
 }
 
-const validarCamposUsuario = ({ nombre, edad }) => {
-    if (!esTextoNoVacio(nombre)) return 'El campo "nombre" es obligatorio'
-    if (!Number.isInteger(edad) || edad < 0) return 'El campo "edad" debe ser un número entero positivo'
-    return null
-}
 
-const validarCamposProducto = ({ nombre, precio }) => {
-    if (!esTextoNoVacio(nombre)) return 'El campo "nombre" es obligatorio'
-    if (typeof precio !== 'number' || !Number.isFinite(precio) || precio < 0)
-        return 'El campo "precio" debe ser un número positivo'
-    return null
-}
+// Redirigir a la documentación de la API
+app.get("/", (request, response) => response.redirect("/api-docs"))
 
-const validarCredenciales = ({ email, password }) => {
-    if (!esEmail(email)) return 'El campo "email" no es válido'
-    if (typeof password !== 'string' || password.length < 6)
-        return 'La contraseña debe tener al menos 6 caracteres'
-    return null
-}
 
-const crearUsuario = async ({ nombre, edad, email, password }) => {
-    const passwordHash = await bcrypt.hash(password, 10)
-    const documento = { nombre: nombre.trim(), edad, email: email.toLowerCase(), passwordHash }
-    const resultado = await usuarios.insertOne(documento)
-    return { _id: resultado.insertedId, nombre: documento.nombre, edad: documento.edad, email: documento.email }
-}
+// LOGIN
+app.post('/api/login', async (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
 
-const manejarDuplicado = (fallo, respuesta) => {
-    if (fallo?.code === 11000)
-        return respuesta.status(409).json({ message: 'Ya existe un usuario con ese email' })
-    throw fallo
-}
+    const { nombre, password } = request.body
 
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
+    const user = Users.find(u => u.nombre == nombre)
 
-app.get("/", (peticion, respuesta) => {
-    respuesta.redirect("/api-docs")
-})
-
-app.post('/api/auth/register', limitadorAuth, exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const error = validarCamposUsuario(peticion.body) ?? validarCredenciales(peticion.body)
-    if (error) return respuesta.status(400).json({ message: error })
-
-    try {
-        const usuario = await crearUsuario(peticion.body)
-        return respuesta.status(201).json(usuario)
-    } catch (fallo) {
-        return manejarDuplicado(fallo, respuesta)
-    }
-}))
-
-app.post('/api/auth/login', limitadorAuth, exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const { email, password } = peticion.body
-    if (!esEmail(email) || typeof password !== 'string')
-        return respuesta.status(400).json({ message: 'Email y contraseña son obligatorios' })
-
-    const usuario = await usuarios.findOne({ email: email.toLowerCase() })
-    const valida = usuario?.passwordHash && await bcrypt.compare(password, usuario.passwordHash)
-    if (!valida) return respuesta.status(401).json({ message: 'Credenciales incorrectas' })
-
-    const tokenAcceso = firmarTokenAcceso(usuario)
-    const tokenRefresco = await emitirTokenRefresco(usuario)
-    return respuesta.status(200).json({ accessToken: tokenAcceso, refreshToken: tokenRefresco })
-}))
-
-app.post('/api/auth/refresh', limitadorAuth, exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const { refreshToken: tokenRefresco } = peticion.body
-    if (!esTextoNoVacio(tokenRefresco))
-        return respuesta.status(400).json({ message: 'Falta el refreshToken' })
-
-    let carga
-    try {
-        carga = jwt.verify(tokenRefresco, SECRETO_REFRESH)
-    } catch {
-        return respuesta.status(401).json({ message: 'Refresh token no válido o caducado' })
+    if (user == undefined) {
+        return response.status(401).json({ message: "Usuario no encontrado" })
     }
 
-    const guardado = await tokensRefresco.findOneAndDelete({ tokenHash: hashearToken(tokenRefresco) })
-    if (!guardado) return respuesta.status(401).json({ message: 'Refresh token revocado' })
+    // Comparamos la contraseña
+    const correctPassword = await bcrypt.compare(password, user.password)
 
-    const usuario = await usuarios.findOne({ _id: new ObjectId(carga.sub) })
-    if (!usuario) return respuesta.status(401).json({ message: 'Usuario no encontrado' })
-
-    const tokenAcceso = firmarTokenAcceso(usuario)
-    const tokenRefrescoNuevo = await emitirTokenRefresco(usuario)
-    return respuesta.status(200).json({ accessToken: tokenAcceso, refreshToken: tokenRefrescoNuevo })
-}))
-
-app.post('/api/auth/logout', exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const { refreshToken: tokenRefresco } = peticion.body
-    if (!esTextoNoVacio(tokenRefresco))
-        return respuesta.status(400).json({ message: 'Falta el refreshToken' })
-
-    await tokensRefresco.deleteOne({ tokenHash: hashearToken(tokenRefresco) })
-    return respuesta.status(200).json({ message: 'Sesión cerrada' })
-}))
-
-const SIN_PASSWORD = { projection: { passwordHash: 0 } }
-
-app.get('/api/users', manejadorAsync(async (peticion, respuesta) => {
-    const resultados = await usuarios.find({}, SIN_PASSWORD).toArray()
-    respuesta.status(200).json(resultados)
-}))
-
-app.get('/api/users/:id', exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const usuario = await usuarios.findOne({ _id: new ObjectId(peticion.params.id) }, SIN_PASSWORD)
-    if (!usuario) return respuesta.status(404).json({ message: 'Usuario no encontrado' })
-    respuesta.status(200).json(usuario)
-}))
-
-app.post('/api/users', verificarToken, exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const error = validarCamposUsuario(peticion.body) ?? validarCredenciales(peticion.body)
-    if (error) return respuesta.status(400).json({ message: error })
-
-    try {
-        const usuario = await crearUsuario(peticion.body)
-        return respuesta.status(201).json(usuario)
-    } catch (fallo) {
-        return manejarDuplicado(fallo, respuesta)
+    if (!correctPassword) {
+        return response.status(401).json({ message: "Contraseña incorrecta" })
     }
-}))
 
-app.put('/api/users/:id', verificarToken, exigirJson, exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const error = validarCamposUsuario(peticion.body)
-    if (error) return respuesta.status(400).json({ message: error })
-
-    const { nombre, edad } = peticion.body
-    const resultado = await usuarios.updateOne(
-        { _id: new ObjectId(peticion.params.id) },
-        { $set: { nombre: nombre.trim(), edad } }
+    // Generamos el Access Token (corta duración, ej: 15 minutos)
+    const accessToken = jwt.sign(
+        { id: user.id, nombre: user.nombre },
+        SECRET_KEY,
+        { expiresIn: '15m' }
     )
-    if (resultado.matchedCount === 0) return respuesta.status(404).json({ message: 'Usuario no encontrado' })
-    respuesta.status(200).json(resultado)
-}))
 
-app.delete('/api/users/:id', verificarToken, exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const resultado = await usuarios.deleteOne({ _id: new ObjectId(peticion.params.id) })
-    if (resultado.deletedCount === 0) return respuesta.status(404).json({ message: 'Usuario no encontrado' })
-    respuesta.status(200).json(resultado)
-}))
-
-
-app.get('/api/products', manejadorAsync(async (peticion, respuesta) => {
-    const resultados = await productos.find({}).toArray()
-    respuesta.status(200).json(resultados)
-}))
-
-app.get('/api/products/:id', exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const producto = await productos.findOne({ _id: new ObjectId(peticion.params.id) })
-    if (!producto) return respuesta.status(404).json({ message: 'Producto no encontrado' })
-    respuesta.status(200).json(producto)
-}))
-
-app.post('/api/products', verificarToken, exigirJson, manejadorAsync(async (peticion, respuesta) => {
-    const error = validarCamposProducto(peticion.body)
-    if (error) return respuesta.status(400).json({ message: error })
-
-    const { nombre, precio } = peticion.body
-    const documento = { nombre: nombre.trim(), precio }
-    const resultado = await productos.insertOne(documento)
-    return respuesta.status(201).json({ _id: resultado.insertedId, ...documento })
-}))
-
-app.put('/api/products/:id', verificarToken, exigirJson, exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const error = validarCamposProducto(peticion.body)
-    if (error) return respuesta.status(400).json({ message: error })
-
-    const { nombre, precio } = peticion.body
-    const resultado = await productos.updateOne(
-        { _id: new ObjectId(peticion.params.id) },
-        { $set: { nombre: nombre.trim(), precio } }
+    // Generamos el Refresh Token (larga duración, ej: 7 días)
+    const refreshToken = jwt.sign(
+        { id: user.id, nombre: user.nombre },
+        SECRET_KEY,
+        { expiresIn: '7d' }
     )
-    if (resultado.matchedCount === 0) return respuesta.status(404).json({ message: 'Producto no encontrado' })
-    respuesta.status(200).json(resultado)
-}))
 
-app.delete('/api/products/:id', verificarToken, exigirIdValido, manejadorAsync(async (peticion, respuesta) => {
-    const resultado = await productos.deleteOne({ _id: new ObjectId(peticion.params.id) })
-    if (resultado.deletedCount === 0) return respuesta.status(404).json({ message: 'Producto no encontrado' })
-    respuesta.status(200).json(resultado)
-}))
-
-app.use((peticion, respuesta) => {
-    respuesta.status(404).json({ message: 'Ruta no encontrada' })
+    response.json({ accessToken, refreshToken })
 })
 
-app.use((error, peticion, respuesta, siguiente) => {
-    // JSON mal formado
-    if (error.type === 'entity.parse.failed')
-        return respuesta.status(400).json({ message: 'JSON mal formado' })
+// REFRESH TOKEN
+app.post('/api/refresh', (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    console.error(error)
-    respuesta.status(500).json({ message: 'Error interno del servidor' })
+    const { refreshToken } = request.body
+
+    if (!refreshToken) {
+        return response.status(401).json({ message: "Refresh token requerido" })
+    }
+
+    try {
+        // Verificamos el refresh token
+        const user = jwt.verify(refreshToken, SECRET_KEY)
+
+        // Generamos un nuevo access token
+        const accessToken = jwt.sign(
+            { id: user.id, nombre: user.nombre },
+            SECRET_KEY,
+            { expiresIn: '15m' }
+        )
+
+        response.json({ accessToken })
+    } catch (err) {
+        return response.status(401).json({ message: "Refresh token inválido o expirado" })
+    }
 })
 
-if (!process.env.VERCEL)
-    app.listen(PUERTO, () => console.log(`Servidor web iniciado en puerto: ${PUERTO}`))
+
+// -------------- USERS ------------------
+
+// GET
+app.get('/api/users', (request, response) => response.json(Users))
+
+// GET 
+app.get('/api/users/:id', (request, response) => {
+    let user = Users.find(u => u.id == request.params.id)
+
+    if (user !== undefined) { // Si es encontrado    
+        return response.json(user)
+    } else {
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+
+// POST 
+app.post('/api/users', verifyToken, async (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
+
+    let sig = Users.length > 0 ? Math.max(...Users.map(u => u.id)) + 1 : 0
+
+    const { nombre, edad, password } = request.body
+    const hashedPassword = await bcrypt.hash(password, 10)
+    Users.push({ id: sig, nombre, edad, password: hashedPassword })
+    return response.json(Users)
+})
+
+
+// PUT
+app.put('/api/users/:id', verifyToken, (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
+
+    const { id } = request.params
+    const { nombre, edad } = request.body
+
+    // Obtenemos posición    
+    const pos = Users.findIndex(u => u.id == id)
+
+    if (pos != -1) { // Si es encontrado
+        const password = Users[pos].password
+        Users.splice(pos, 1, { id: Number(id), nombre, edad, password })
+        return response.json(Users)
+    } else { // Sino
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+// DELETE
+app.delete('/api/users/:id', verifyToken, (request, response) => {
+    // Obtenemos posición    
+    const pos = Users.findIndex(u => u.id == request.params.id)
+
+    if (pos != -1) { // Si es encontrado
+        Users.splice(pos, 1)
+        return response.json(Users)
+    } else { // Sino
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+
+// -------------- MOTORES (desguace) ------------------
+
+// GET
+app.get('/api/motores', (request, response) => response.json(Motores))
+
+// GET 
+app.get('/api/motores/:id', (request, response) => {
+    let motor = Motores.find(m => m.id == request.params.id)
+
+    if (motor !== undefined) { // Si es encontrado    
+        return response.json(motor)
+    } else {
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+
+// POST 
+app.post('/api/motores', verifyToken, (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
+
+    let sig = Motores.length > 0 ? Math.max(...Motores.map(m => m.id)) + 1 : 0
+
+    const { marca, modelo, cilindrada, combustible, kilometros, precio } = request.body
+    Motores.push({ id: sig, marca, modelo, cilindrada, combustible, kilometros, precio })
+    return response.json(Motores)
+})
+
+
+// PUT
+app.put('/api/motores/:id', verifyToken, (request, response) => {
+    if (!request.is('json'))
+        return response.json({ message: 'Debes proporcionar datos JSON' })
+
+    const { id } = request.params
+    const { marca, modelo, cilindrada, combustible, kilometros, precio } = request.body
+
+    // Obtenemos posición    
+    const pos = Motores.findIndex(m => m.id == id)
+
+    if (pos != -1) { // Si es encontrado
+        Motores.splice(pos, 1, { id: Number(id), marca, modelo, cilindrada, combustible, kilometros, precio })
+        return response.json(Motores)
+    } else { // Sino
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+// DELETE
+app.delete('/api/motores/:id', verifyToken, (request, response) => {
+    // Obtenemos posición    
+    const pos = Motores.findIndex(m => m.id == request.params.id)
+
+    if (pos != -1) { // Si es encontrado
+        Motores.splice(pos, 1)
+        return response.json(Motores)
+    } else { // Sino
+        response.json({ message: 'El elemento no ha sido encontrado' })
+    }
+})
+
+const PORT = process.env.PORT || 3000
+
+app.listen(PORT, () => {
+    console.log(`Servidor web iniciado en puerto: 3001`)
+    console.log(`Documentación de Swagger disponible en: http://localhost:3001/api-docs`)
+})
 
 export default app

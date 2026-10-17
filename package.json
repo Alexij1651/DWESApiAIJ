@@ -1,7 +1,7 @@
 {
   "name": "api",
   "version": "1.0.0",
-  "description": "API REST con MongoDB Atlas, JWT (access + refresh), rate limit y Swagger",
+  "description": "",
   "main": "index.js",
   "type": "module",
   "engines": {
