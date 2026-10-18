@@ -19,11 +19,10 @@ if (!URL_BD || !SECRET_KEY || !REFRESH_KEY) {
 }
 
 const app = express()
-app.set('trust proxy', 1) // En Vercel, para que el rate limit vea la IP real
+app.set('trust proxy', 1)
 app.use(express.json())
 app.use(cors())
 
-// Límite de peticiones (Rate Limit)
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 100,
@@ -31,7 +30,6 @@ const limiter = rateLimit({
 })
 app.use(limiter)
 
-// Conexión a MongoDB con MongoClient y autoinicialización (Seed)
 const cliente = new MongoClient(URL_BD, { serverSelectionTimeoutMS: 5000 })
 try {
     await cliente.connect()
@@ -45,7 +43,6 @@ const usuarios = bd.collection('users')
 const motores = bd.collection('motores')
 const SIN_PASSWORD = { projection: { password: 0 } } // La contraseña nunca se devuelve
 
-// Autoinicializar datos por defecto si las colecciones están vacías
 if (await usuarios.countDocuments() === 0) {
     await usuarios.insertMany([
         { id: 0, nombre: "Alex", edad: 30, password: "$2b$10$DJaR.zEOJhgU2CA32EMaL.zImAjxfYPL7NCD9UG.dXdLOciuhzyXS" }, // password: 123456
@@ -61,7 +58,6 @@ if (await motores.countDocuments() === 0) {
     ])
 }
 
-// Middleware de verificación de token JWT
 function verifyToken(request, response, next) {
     const cabecera = request.headers.authorization || ''
     const [esquema, token] = cabecera.split(' ')
@@ -81,7 +77,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument))
 
 app.get("/", (request, response) => response.redirect("/api-docs"))
 
-// LOGIN
+// LOGIN PRINCIPAL
 app.post('/api/login', async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
@@ -133,7 +129,7 @@ app.post('/api/refresh', async (request, response) => {
     }
 })
 
-// -------------- USERS ------------------
+// -------------- Usuarios ------------------
 
 app.get('/api/users', async (request, response) => {
     const lista = await usuarios.find({}, SIN_PASSWORD).toArray()
@@ -165,7 +161,6 @@ app.post('/api/users', verifyToken, async (request, response) => {
     if (await usuarios.findOne({ nombre }))
         return response.status(409).json({ message: 'Ese usuario ya existe' })
 
-    // El nuevo id es el mayor que hay + 1
     const ultimo = await usuarios.find().sort({ id: -1 }).limit(1).toArray()
     const id = ultimo.length ? ultimo[0].id + 1 : 0
     const hashedPassword = await bcrypt.hash(password, 10)
@@ -236,9 +231,8 @@ app.post('/api/motores', verifyToken, async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    // Solo se guardan los campos permitidos
     const { marca, modelo, cilindrada, combustible, kilometros, precio } = request.body
-    // El nuevo id es el mayor que hay + 1
+
     const ultimo = await motores.find().sort({ id: -1 }).limit(1).toArray()
     const id = ultimo.length ? ultimo[0].id + 1 : 0
 
