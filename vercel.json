@@ -6,6 +6,7 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": [
+          "openapi.json",
           "node_modules/swagger-ui-dist/**"
         ]
       }

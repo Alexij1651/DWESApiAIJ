@@ -3,7 +3,7 @@
   "info": {
     "title": "REST API - Engine Scrapyard",
     "version": "1.0.0",
-    "description": "API REST con autenticación JWT, Refresh Token y rate limit."
+    "description": "API REST con autenticación JWT, Refresh Token, rate limit y MongoDB."
   },
   "components": {
     "securitySchemes": {
@@ -22,6 +22,16 @@
         },
         "required": ["nombre", "password"]
       },
+      "Refresh": {
+        "type": "object",
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "example": "tu_refresh_token_aqui"
+          }
+        },
+        "required": ["refreshToken"]
+      },
       "User": {
         "type": "object",
         "properties": {
@@ -36,18 +46,30 @@
         "type": "object",
         "properties": {
           "id": { "type": "integer", "example": 0 },
-          "marca": { "type": "string", "example": "Renault" },
-          "modelo": { "type": "string", "example": "K9K 1.5 dCi" },
-          "cilindrada": { "type": "integer", "example": 1461 },
+          "marca": { "type": "string", "example": "BMW" },
+          "modelo": { "type": "string", "example": "Serie 3" },
+          "cilindrada": { "type": "integer", "example": 2000 },
           "combustible": { "type": "string", "example": "Diesel" },
-          "kilometros": { "type": "integer", "example": 120000 },
-          "precio": { "type": "number", "example": 850 }
+          "kilometros": { "type": "integer", "example": 150000 },
+          "precio": { "type": "number", "example": 12000 }
         },
-        "required": ["marca", "modelo", "cilindrada", "combustible", "kilometros", "precio"]
+        "required": [
+          "marca",
+          "modelo",
+          "cilindrada",
+          "combustible",
+          "kilometros",
+          "precio"
+        ]
       }
     },
     "parameters": {
-      "id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+      "id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer" }
+      }
     }
   },
   "paths": {
@@ -56,7 +78,11 @@
         "summary": "Iniciar sesión",
         "tags": ["Authentication"],
         "requestBody": {
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Auth" } } }
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Auth" }
+            }
+          }
         },
         "responses": { "200": { "description": "Tokens de acceso y refresco" } }
       }
@@ -66,7 +92,11 @@
         "summary": "Renovar access token",
         "tags": ["Authentication"],
         "requestBody": {
-          "content": { "application/json": { "schema": { "type": "object", "properties": { "refreshToken": { "type": "string" } } } } }
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Refresh" }
+            }
+          }
         },
         "responses": { "200": { "description": "Nuevo accessToken" } }
       }
@@ -82,7 +112,11 @@
         "tags": ["Users"],
         "security": [{ "bearerAuth": [] }],
         "requestBody": {
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } }
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/User" }
+            }
+          }
         },
         "responses": { "200": { "description": "Usuario creado" } }
       }
@@ -100,7 +134,17 @@
         "security": [{ "bearerAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }],
         "requestBody": {
-          "content": { "application/json": { "schema": { "type": "object", "properties": { "nombre": { "type": "string" }, "edad": { "type": "integer" } } } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nombre": { "type": "string" },
+                  "edad": { "type": "integer" }
+                }
+              }
+            }
+          }
         },
         "responses": { "200": { "description": "Usuario actualizado" } }
       },
@@ -123,7 +167,11 @@
         "tags": ["Engines"],
         "security": [{ "bearerAuth": [] }],
         "requestBody": {
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Engine" } } }
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Engine" }
+            }
+          }
         },
         "responses": { "200": { "description": "Motor añadido" } }
       }
@@ -141,7 +189,11 @@
         "security": [{ "bearerAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }],
         "requestBody": {
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Engine" } } }
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Engine" }
+            }
+          }
         },
         "responses": { "200": { "description": "Motor actualizado" } }
       },

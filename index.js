@@ -1,57 +1,85 @@
-import express from "express";
-import cors from "cors";
-import bcrypt from "bcryptjs"  // Hashing de contraseñas
-import jwt from "jsonwebtoken" // Generacion y verificacion de tokens
+import { MongoClient } from 'mongodb'
+import express from "express"
+import cors from "cors"
+import bcrypt from "bcryptjs"
+import jwt from "jsonwebtoken"
+import rateLimit from "express-rate-limit"
 import swaggerUi from "swagger-ui-express"
 import swaggerDocument from "./openapi.json" with { type: "json" }
-// Para que swagger funcione correctamente en Vercel es necesario archivo vercel.json
-// y añadir configuración indicada en https://github.com/swagger-api/swagger-ui/issues/9924#issuecomment-3360835086
 
+const PUERTO = process.env.PORT || 3000
+const URL_BD = process.env.MONGODB_URI
+const NOMBRE_BD = process.env.DB_NAME || 'api'
+const SECRET_KEY = process.env.JWT_SECRET       // Firma el access token
+const REFRESH_KEY = process.env.REFRESH_SECRET  // Firma el refresh token
 
-const SECRET_KEY = "secreto" // Secreto para firmar y verificar el token
+if (!URL_BD || !SECRET_KEY || !REFRESH_KEY) {
+    console.error('Faltan variables de entorno: MONGODB_URI, JWT_SECRET y/o REFRESH_SECRET')
+    process.exit(1)
+}
+
 const app = express()
+app.set('trust proxy', 1) // En Vercel, para que el rate limit vea la IP real
+app.use(express.json())
+app.use(cors())
 
-//Estas contraseñas son las que nos permite iniciar sesion
-let Users = [
-    { id: 0, nombre: "Alex", edad: 30, password: "$2b$10$DJaR.zEOJhgU2CA32EMaL.zImAjxfYPL7NCD9UG.dXdLOciuhzyXS" }, // password: 123456
-    { id: 1, nombre: "Ana", edad: 25, password: "$2b$10$l/.WxXkTG6pKVB7KYU/KROXVvH7nAQqyrsq5PW1b.1X4v6L2u00u2" }, // password: ana
-    { id: 2, nombre: "Eva", edad: 28, password: "$2b$10$TW/qH6MQ/fd4sRijnHIdoekydhtIonurDMvxZHgqNaIR4st2A90Xe" }  // password: eva
-]
+// Límite de peticiones (Rate Limit)
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+    message: { message: 'Demasiadas peticiones, inténtalo más tarde' }
+})
+app.use(limiter)
 
-let Motores = [
-    { id: 0, marca: "BMW", modelo: "Serie 3", cilindrada: 2000, combustible: "Diesel", kilometros: 150000, precio: 12000 },
-    { id: 1, marca: "Audi", modelo: "A4", cilindrada: 1900, combustible: "Gasolina", kilometros: 120000, precio: 10000 }
-]
+// Conexión a MongoDB con MongoClient y autoinicialización (Seed)
+const cliente = new MongoClient(URL_BD, { serverSelectionTimeoutMS: 5000 })
+try {
+    await cliente.connect()
+} catch (err) {
+    console.error('No se pudo conectar con MongoDB:', err.message)
+    process.exit(1)
+}
 
+const bd = cliente.db(NOMBRE_BD)
+const usuarios = bd.collection('users')
+const motores = bd.collection('motores')
+const SIN_PASSWORD = { projection: { password: 0 } } // La contraseña nunca se devuelve
 
+// Autoinicializar datos por defecto si las colecciones están vacías
+if (await usuarios.countDocuments() === 0) {
+    await usuarios.insertMany([
+        { id: 0, nombre: "Alex", edad: 30, password: "$2b$10$DJaR.zEOJhgU2CA32EMaL.zImAjxfYPL7NCD9UG.dXdLOciuhzyXS" }, // password: 123456
+        { id: 1, nombre: "Ana", edad: 25, password: "$2b$10$l/.WxXkTG6pKVB7KYU/KROXVvH7nAQqyrsq5PW1b.1X4v6L2u00u2" }, // password: ana
+        { id: 2, nombre: "Eva", edad: 28, password: "$2b$10$TW/qH6MQ/fd4sRijnHIdoekydhtIonurDMvxZHgqNaIR4st2A90Xe" }  // password: eva
+    ])
+}
 
-app.use(express.json())   // IMPORTANTE
-app.use(cors())           // Para habilitar CORS
-app.use(
-    "/api-docs",
-    swaggerUi.serve,
-    swaggerUi.setup(swaggerDocument)
-)
+if (await motores.countDocuments() === 0) {
+    await motores.insertMany([
+        { id: 0, marca: "BMW", modelo: "Serie 3", cilindrada: 2000, combustible: "Diesel", kilometros: 150000, precio: 12000 },
+        { id: 1, marca: "Audi", modelo: "A4", cilindrada: 1900, combustible: "Gasolina", kilometros: 120000, precio: 10000 }
+    ])
+}
 
-
-
+// Middleware de verificación de token JWT
 function verifyToken(request, response, next) {
-    const token = request.headers.authorization?.split(" ")[1]; // formato "Bearer <token>"
+    const cabecera = request.headers.authorization || ''
+    const [esquema, token] = cabecera.split(' ')
 
-    if (!token) return response.status(403).json({ message: "Token requerido" });
+    if (esquema !== 'Bearer' || !token)
+        return response.status(401).json({ message: 'Token no proporcionado' })
 
     try {
-        request.user = jwt.verify(token, SECRET_KEY);
-        next();
-    } catch (err) {
-        return response.status(403).json({ message: "Token inválido" });
+        request.user = jwt.verify(token, SECRET_KEY)
+        next()
+    } catch {
+        return response.status(401).json({ message: 'Token no válido o caducado' })
     }
 }
 
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument))
 
-// Redirigir a la documentación de la API
 app.get("/", (request, response) => response.redirect("/api-docs"))
-
 
 // LOGIN
 app.post('/api/login', async (request, response) => {
@@ -60,30 +88,24 @@ app.post('/api/login', async (request, response) => {
 
     const { nombre, password } = request.body
 
-    const user = Users.find(u => u.nombre == nombre)
+    if (!nombre || !password)
+        return response.status(400).json({ message: 'nombre y password son obligatorios' })
 
-    if (user == undefined) {
-        return response.status(401).json({ message: "Usuario no encontrado" })
+    const user = await usuarios.findOne({ nombre })
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+        return response.status(401).json({ message: "Credenciales incorrectas" })
     }
 
-    // Comparamos la contraseña
-    const correctPassword = await bcrypt.compare(password, user.password)
-
-    if (!correctPassword) {
-        return response.status(401).json({ message: "Contraseña incorrecta" })
-    }
-
-    // Generamos el Access Token (corta duración, ej: 15 minutos)
     const accessToken = jwt.sign(
-        { id: user.id, nombre: user.nombre },
+        { id: user._id, nombre: user.nombre },
         SECRET_KEY,
         { expiresIn: '15m' }
     )
 
-    // Generamos el Refresh Token (larga duración, ej: 7 días)
     const refreshToken = jwt.sign(
-        { id: user.id, nombre: user.nombre },
-        SECRET_KEY,
+        { id: user._id, nombre: user.nombre },
+        REFRESH_KEY,
         { expiresIn: '7d' }
     )
 
@@ -91,166 +113,182 @@ app.post('/api/login', async (request, response) => {
 })
 
 // REFRESH TOKEN
-app.post('/api/refresh', (request, response) => {
+app.post('/api/refresh', async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
     const { refreshToken } = request.body
-
-    if (!refreshToken) {
-        return response.status(401).json({ message: "Refresh token requerido" })
-    }
+    if (!refreshToken) return response.status(401).json({ message: "Refresh token requerido" })
 
     try {
-        // Verificamos el refresh token
-        const user = jwt.verify(refreshToken, SECRET_KEY)
-
-        // Generamos un nuevo access token
+        const user = jwt.verify(refreshToken, REFRESH_KEY)
         const accessToken = jwt.sign(
             { id: user.id, nombre: user.nombre },
             SECRET_KEY,
             { expiresIn: '15m' }
         )
-
         response.json({ accessToken })
     } catch (err) {
         return response.status(401).json({ message: "Refresh token inválido o expirado" })
     }
 })
 
-
 // -------------- USERS ------------------
 
-// GET
-app.get('/api/users', (request, response) => response.json(Users))
+app.get('/api/users', async (request, response) => {
+    const lista = await usuarios.find({}, SIN_PASSWORD).toArray()
+    response.json(lista)
+})
 
-// GET 
-app.get('/api/users/:id', (request, response) => {
-    let user = Users.find(u => u.id == request.params.id)
+app.get('/api/users/:id', async (request, response) => {
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
 
-    if (user !== undefined) { // Si es encontrado    
+    const user = await usuarios.findOne({ id }, SIN_PASSWORD)
+    if (user) {
         return response.json(user)
     } else {
-        response.json({ message: 'El elemento no ha sido encontrado' })
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
-
-// POST 
 app.post('/api/users', verifyToken, async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    let sig = Users.length > 0 ? Math.max(...Users.map(u => u.id)) + 1 : 0
-
     const { nombre, edad, password } = request.body
+
+    if (!nombre || !password)
+        return response.status(400).json({ message: 'nombre y password son obligatorios' })
+
+    if (await usuarios.findOne({ nombre }))
+        return response.status(409).json({ message: 'Ese usuario ya existe' })
+
+    // El nuevo id es el mayor que hay + 1
+    const ultimo = await usuarios.find().sort({ id: -1 }).limit(1).toArray()
+    const id = ultimo.length ? ultimo[0].id + 1 : 0
     const hashedPassword = await bcrypt.hash(password, 10)
-    Users.push({ id: sig, nombre, edad, password: hashedPassword })
-    return response.json(Users)
+
+    await usuarios.insertOne({ id, nombre, edad, password: hashedPassword })
+    const lista = await usuarios.find({}, SIN_PASSWORD).toArray()
+    return response.json(lista)
 })
 
-
-// PUT
-app.put('/api/users/:id', verifyToken, (request, response) => {
+app.put('/api/users/:id', verifyToken, async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    const { id } = request.params
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
+
     const { nombre, edad } = request.body
+    const resultado = await usuarios.updateOne(
+        { id },
+        { $set: { nombre, edad } }
+    )
 
-    // Obtenemos posición    
-    const pos = Users.findIndex(u => u.id == id)
-
-    if (pos != -1) { // Si es encontrado
-        const password = Users[pos].password
-        Users.splice(pos, 1, { id: Number(id), nombre, edad, password })
-        return response.json(Users)
-    } else { // Sino
-        response.json({ message: 'El elemento no ha sido encontrado' })
+    if (resultado.matchedCount > 0) {
+        const lista = await usuarios.find({}, SIN_PASSWORD).toArray()
+        return response.json(lista)
+    } else {
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
-// DELETE
-app.delete('/api/users/:id', verifyToken, (request, response) => {
-    // Obtenemos posición    
-    const pos = Users.findIndex(u => u.id == request.params.id)
+app.delete('/api/users/:id', verifyToken, async (request, response) => {
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
 
-    if (pos != -1) { // Si es encontrado
-        Users.splice(pos, 1)
-        return response.json(Users)
-    } else { // Sino
-        response.json({ message: 'El elemento no ha sido encontrado' })
+    const resultado = await usuarios.deleteOne({ id })
+
+    if (resultado.deletedCount > 0) {
+        const lista = await usuarios.find({}, SIN_PASSWORD).toArray()
+        return response.json(lista)
+    } else {
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
+// -------------- MOTORES ------------------
 
-// -------------- MOTORES (desguace) ------------------
+app.get('/api/motores', async (request, response) => {
+    const lista = await motores.find({}).toArray()
+    response.json(lista)
+})
 
-// GET
-app.get('/api/motores', (request, response) => response.json(Motores))
+app.get('/api/motores/:id', async (request, response) => {
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
 
-// GET 
-app.get('/api/motores/:id', (request, response) => {
-    let motor = Motores.find(m => m.id == request.params.id)
-
-    if (motor !== undefined) { // Si es encontrado    
+    const motor = await motores.findOne({ id })
+    if (motor) {
         return response.json(motor)
     } else {
-        response.json({ message: 'El elemento no ha sido encontrado' })
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
-
-// POST 
-app.post('/api/motores', verifyToken, (request, response) => {
+app.post('/api/motores', verifyToken, async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    let sig = Motores.length > 0 ? Math.max(...Motores.map(m => m.id)) + 1 : 0
-
+    // Solo se guardan los campos permitidos
     const { marca, modelo, cilindrada, combustible, kilometros, precio } = request.body
-    Motores.push({ id: sig, marca, modelo, cilindrada, combustible, kilometros, precio })
-    return response.json(Motores)
+    // El nuevo id es el mayor que hay + 1
+    const ultimo = await motores.find().sort({ id: -1 }).limit(1).toArray()
+    const id = ultimo.length ? ultimo[0].id + 1 : 0
+
+    await motores.insertOne({ id, marca, modelo, cilindrada, combustible, kilometros, precio })
+    const lista = await motores.find({}).toArray()
+    return response.json(lista)
 })
 
-
-// PUT
-app.put('/api/motores/:id', verifyToken, (request, response) => {
+app.put('/api/motores/:id', verifyToken, async (request, response) => {
     if (!request.is('json'))
         return response.json({ message: 'Debes proporcionar datos JSON' })
 
-    const { id } = request.params
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
+
     const { marca, modelo, cilindrada, combustible, kilometros, precio } = request.body
+    const resultado = await motores.updateOne(
+        { id },
+        { $set: { marca, modelo, cilindrada, combustible, kilometros, precio } }
+    )
 
-    // Obtenemos posición    
-    const pos = Motores.findIndex(m => m.id == id)
-
-    if (pos != -1) { // Si es encontrado
-        Motores.splice(pos, 1, { id: Number(id), marca, modelo, cilindrada, combustible, kilometros, precio })
-        return response.json(Motores)
-    } else { // Sino
-        response.json({ message: 'El elemento no ha sido encontrado' })
+    if (resultado.matchedCount > 0) {
+        const lista = await motores.find({}).toArray()
+        return response.json(lista)
+    } else {
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
-// DELETE
-app.delete('/api/motores/:id', verifyToken, (request, response) => {
-    // Obtenemos posición    
-    const pos = Motores.findIndex(m => m.id == request.params.id)
+app.delete('/api/motores/:id', verifyToken, async (request, response) => {
+    const id = Number(request.params.id)
+    if (!Number.isInteger(id))
+        return response.status(400).json({ message: 'Id no válido' })
 
-    if (pos != -1) { // Si es encontrado
-        Motores.splice(pos, 1)
-        return response.json(Motores)
-    } else { // Sino
-        response.json({ message: 'El elemento no ha sido encontrado' })
+    const resultado = await motores.deleteOne({ id })
+
+    if (resultado.deletedCount > 0) {
+        const lista = await motores.find({}).toArray()
+        return response.json(lista)
+    } else {
+        return response.status(404).json({ message: 'El elemento no ha sido encontrado' })
     }
 })
 
-const PORT = process.env.PORT || 3000
-
-app.listen(PORT, () => {
-    console.log(`Servidor web iniciado en puerto: 3001`)
-    console.log(`Documentación de Swagger disponible en: http://localhost:3001/api-docs`)
-})
+// En Vercel no se escucha en un puerto: se exporta la app
+if (!process.env.VERCEL) {
+    app.listen(PUERTO, () => {
+        console.log(`Servidor web iniciado en puerto: ${PUERTO}`)
+    })
+}
 
 export default app
